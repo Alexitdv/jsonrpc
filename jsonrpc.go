@@ -2,6 +2,7 @@ package jsonrpc
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -29,10 +30,11 @@ type (
 
 	// A Response represents a JSON-RPC response returned by the server.
 	Response struct {
-		Version string           `json:"jsonrpc"`
-		Result  any              `json:"result,omitempty"`
-		Error   *Error           `json:"error,omitempty"`
-		ID      *json.RawMessage `json:"id,omitempty"`
+		Version   string             `json:"jsonrpc"`
+		ID        *json.RawMessage   `json:"id,omitempty"`
+		Result    any                `json:"result,omitempty"`
+		Error     *Error             `json:"error,omitempty"`
+		CancelReq context.CancelFunc `json:"-"`
 	}
 )
 
@@ -92,9 +94,7 @@ func NewResponse(r *Request) *Response {
 	}
 }
 
-// SendResponse writes JSON-RPC response.
-func SendResponse(w http.ResponseWriter, resp []*Response, batch bool) error {
-	w.Header().Set(contentTypeKey, contentTypeValue)
+func WriteNoStream(w http.ResponseWriter, resp []*Response, batch bool) error {
 	if batch || len(resp) > 1 {
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			return fmt.Errorf("jsonrpc: failed to encode: %w", err)
@@ -106,4 +106,55 @@ func SendResponse(w http.ResponseWriter, resp []*Response, batch bool) error {
 	}
 
 	return nil
+}
+
+func CheckStream(resp []*Response) bool {
+	for _, r := range resp {
+		_, ok := r.Result.(chan []byte)
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
+func WriteWithStream(w http.ResponseWriter, resp []*Response, batch bool) error {
+	if batch || len(resp) > 1 {
+		w.Write([]byte("["))
+	}
+	for i, r := range resp {
+		if i > 0 {
+			w.Write([]byte(","))
+		}
+		ch, ok := r.Result.(chan []byte)
+		if ok {
+			w.Write([]byte("{"))
+			w.Write([]byte(fmt.Sprintf(`"jsonrpc": "%s",`, r.Version)))
+			w.Write([]byte(fmt.Sprintf(`"id": %s,`, *r.ID)))
+			w.Write([]byte(`"result": `))
+			for data := range ch {
+				_, err := w.Write(data)
+				if err != nil {
+					r.CancelReq()
+				}
+			}
+			w.Write([]byte("}"))
+		} else {
+			data, _ := json.Marshal(r)
+			w.Write(data)
+		}
+	}
+	if batch || len(resp) > 1 {
+		w.Write([]byte("]"))
+	}
+	return nil
+}
+
+// WriteResponse writes JSON-RPC response.
+func WriteResponse(w http.ResponseWriter, resp []*Response, batch bool) error {
+	w.Header().Set(contentTypeKey, contentTypeValue)
+	if CheckStream(resp) {
+		return WriteWithStream(w, resp, batch)
+	}
+	return WriteNoStream(w, resp, batch)
 }

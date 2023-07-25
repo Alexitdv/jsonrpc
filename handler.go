@@ -3,14 +3,17 @@ package jsonrpc
 import (
 	"context"
 	"fmt"
-	"net/http"
-
 	"github.com/goccy/go-json"
+	"net/http"
 )
 
 // Handler links a method of JSON-RPC request.
 type Handler interface {
 	ServeJSONRPC(c context.Context, params *json.RawMessage) (result any, err *Error)
+}
+
+type StreamHandler interface {
+	ServeJSONRPCStream(c context.Context, params *json.RawMessage) (ch <-chan []byte, err *Error)
 }
 
 // HandlerFunc type is an adapter to allow the use of
@@ -28,7 +31,7 @@ func (f HandlerFunc) ServeJSONRPC(c context.Context, params *json.RawMessage) (a
 func (mr *MethodRepository) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rs, batch, err := ParseRequest(r)
 	if err != nil {
-		err := SendResponse(w, []*Response{
+		err := WriteResponse(w, []*Response{
 			{
 				Version: Version,
 				Error:   err,
@@ -47,7 +50,7 @@ func (mr *MethodRepository) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		resp[i] = mr.InvokeMethod(r.Context(), rs[i])
 	}
 
-	if err := SendResponse(w, resp, batch); err != nil {
+	if err := WriteResponse(w, resp, batch); err != nil {
 		fmt.Fprint(w, "Failed to encode result objects")
 		w.WriteHeader(http.StatusInternalServerError)
 	}
@@ -65,6 +68,7 @@ func (mr *MethodRepository) InvokeMethod(c context.Context, r *Request) *Respons
 	wrappedContext := WithRequestID(c, r.ID)
 	wrappedContext = WithMethodName(wrappedContext, r.Method)
 	wrappedContext = WithMetadata(wrappedContext, md)
+	wrappedContext, res.CancelReq = context.WithCancel(wrappedContext)
 	res.Result, res.Error = md.Handler.ServeJSONRPC(wrappedContext, r.Params)
 	if res.Error != nil {
 		res.Result = nil
